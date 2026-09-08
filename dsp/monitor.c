@@ -58,7 +58,10 @@ extern int strcmp(const char *a, const char *b);
 
 typedef struct {
     hb_monitor_shared_t *shared;
-    uint8_t pending_root_probe;
+    uint8_t pending_pad_valid;
+    uint8_t pending_pad;
+    uint8_t map_valid[16][32];
+    uint8_t map_note[16][32];
     uint8_t last_root_pc[16];
     uint8_t root_streak[16];
 } monitor_instance_t;
@@ -103,6 +106,76 @@ static void destroy_instance(void *value) {
     (void)value;
 }
 
+static int note_delta(int upper, int lower) {
+    int delta = upper - lower;
+    while (delta < 0) delta += 12;
+    return delta;
+}
+
+/* Infer only when the physical mapping itself proves a root-bearing In-Key
+   layout. Chromatic layouts encode key membership in LEDs, not in pitch
+   geometry, so they deliberately remain unresolved here.
+
+   Full melodic grid:
+     pad 68 = bottom-left; pad 76 is directly above.
+     Octaves gives +12, 4ths gives +5. In both, bottom-left is a root pad.
+
+   Drum + 16 Pitches:
+     melodic region is the right four columns: bottom-left of that region is
+     pad 72, directly above is pad 80. We apply the same conservative geometry
+     test there. The left four columns are Drum Rack sample selectors and are
+     never considered root evidence. */
+static int infer_root_from_mapping(monitor_instance_t *instance, uint8_t channel, uint8_t *root_out) {
+    if (!instance || !root_out || channel >= 16) return 0;
+
+    if (instance->map_valid[channel][0] && instance->map_valid[channel][8]) {
+        int lower = instance->map_note[channel][0];
+        int upper = instance->map_note[channel][8];
+        int absolute = upper - lower;
+        if (absolute == 12 || note_delta(upper, lower) == 5) {
+            *root_out = (uint8_t)(lower % 12);
+            return 1;
+        }
+    }
+
+    if (instance->map_valid[channel][4] && instance->map_valid[channel][12]) {
+        int lower = instance->map_note[channel][4];
+        int upper = instance->map_note[channel][12];
+        int absolute = upper - lower;
+        if (absolute == 12 || note_delta(upper, lower) == 5) {
+            *root_out = (uint8_t)(lower % 12);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void maybe_publish_root(monitor_instance_t *instance, uint8_t channel) {
+    if (!instance || !instance->shared || channel >= 16) return;
+    uint8_t root = 0;
+    hb_monitor_shared_t *shared = instance->shared;
+    if (!infer_root_from_mapping(instance, channel, &root)) {
+        shared->root_valid[channel] = 0;
+        instance->root_streak[channel] = 0;
+        return;
+    }
+
+    if (instance->root_streak[channel] > 0 && instance->last_root_pc[channel] == root) {
+        if (instance->root_streak[channel] < 255) instance->root_streak[channel]++;
+    } else {
+        instance->last_root_pc[channel] = root;
+        instance->root_streak[channel] = 1;
+        shared->root_valid[channel] = 0;
+    }
+
+    if (instance->root_streak[channel] >= 2) {
+        shared->root_pc[channel] = root;
+        shared->root_confirmations[channel] = instance->root_streak[channel];
+        shared->root_valid[channel] = 1;
+    }
+}
+
 static void on_midi(void *value, const uint8_t *msg, int len, int source) {
     monitor_instance_t *instance = (monitor_instance_t *)value;
     hb_monitor_shared_t *shared = instance ? instance->shared : 0;
@@ -119,14 +192,13 @@ static void on_midi(void *value, const uint8_t *msg, int len, int source) {
         return;
     }
 
-    /* Physical Move pads are internal notes 68..99. Pad 68 is bottom-left,
-       which is the row root in Move's In-Key layouts. Pair its press with the
-       next cable-2 pitched note emitted by Move, then require two consistent
-       observations on that MIDI channel before publishing a root. */
+    /* Capture physical pad identity only. We do not infer from the pad press
+       itself; the next external pitched note tells us what Move mapped it to. */
     if (source == 0 && len >= 3) {
         uint8_t type = msg[0] & 0xF0;
-        if (type == 0x90 && msg[2] > 0 && msg[1] == 68) {
-            instance->pending_root_probe = 1;
+        if (type == 0x90 && msg[2] > 0 && msg[1] >= 68 && msg[1] <= 99) {
+            instance->pending_pad = (uint8_t)(msg[1] - 68);
+            instance->pending_pad_valid = 1;
         }
         return;
     }
@@ -152,21 +224,12 @@ static void on_midi(void *value, const uint8_t *msg, int len, int source) {
     shared->seq++;
     if (type == 0x90 && data2 > 0) {
         shared->velocities[channel][data1] = data2;
-        if (instance->pending_root_probe) {
-            uint8_t root = (uint8_t)(data1 % 12);
-            if (instance->root_streak[channel] > 0 && instance->last_root_pc[channel] == root) {
-                if (instance->root_streak[channel] < 255) instance->root_streak[channel]++;
-            } else {
-                instance->last_root_pc[channel] = root;
-                instance->root_streak[channel] = 1;
-                shared->root_valid[channel] = 0;
-            }
-            if (instance->root_streak[channel] >= 2) {
-                shared->root_pc[channel] = root;
-                shared->root_confirmations[channel] = instance->root_streak[channel];
-                shared->root_valid[channel] = 1;
-            }
-            instance->pending_root_probe = 0;
+        if (instance->pending_pad_valid) {
+            uint8_t pad = instance->pending_pad;
+            instance->map_note[channel][pad] = data1;
+            instance->map_valid[channel][pad] = 1;
+            instance->pending_pad_valid = 0;
+            maybe_publish_root(instance, channel);
         }
     } else {
         shared->velocities[channel][data1] = 0;
