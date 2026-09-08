@@ -60,6 +60,7 @@ typedef struct {
     hb_monitor_shared_t *shared;
     uint8_t pending_pad_valid;
     uint8_t pending_pad;
+    uint8_t shift_held;
     uint8_t map_valid[16][32];
     uint8_t map_note[16][32];
     uint8_t last_root_pc[16];
@@ -151,6 +152,26 @@ static int infer_root_from_mapping(monitor_instance_t *instance, uint8_t channel
     return 0;
 }
 
+static void invalidate_channel_root(monitor_instance_t *instance, uint8_t channel) {
+    if (!instance || !instance->shared || channel >= 16) return;
+    hb_monitor_shared_t *shared = instance->shared;
+    shared->root_valid[channel] = 0;
+    shared->root_confirmations[channel] = 0;
+    instance->root_streak[channel] = 0;
+}
+
+static void invalidate_all_roots(monitor_instance_t *instance) {
+    if (!instance || !instance->shared) return;
+    instance->shared->seq++;
+    for (uint8_t channel = 0; channel < 16; channel++) {
+        invalidate_channel_root(instance, channel);
+        memset(instance->map_valid[channel], 0, 32);
+    }
+    instance->pending_pad_valid = 0;
+    instance->shared->generation++;
+    instance->shared->seq++;
+}
+
 static void maybe_publish_root(monitor_instance_t *instance, uint8_t channel) {
     if (!instance || !instance->shared || channel >= 16) return;
     uint8_t root = 0;
@@ -192,10 +213,20 @@ static void on_midi(void *value, const uint8_t *msg, int len, int source) {
         return;
     }
 
-    /* Capture physical pad identity only. We do not infer from the pad press
-       itself; the next external pitched note tells us what Move mapped it to. */
+    /* Capture Move control state and physical pad identity.
+       Shift is CC 49; Step 9 is internal note 24. Entering Shift+Step 9 opens
+       Move's key/root control, so invalidate all published roots immediately.
+       We do not guess the new root until the changed pad mapping proves it. */
     if (source == 0 && len >= 3) {
         uint8_t type = msg[0] & 0xF0;
+        if (type == 0xB0 && msg[1] == 49) {
+            instance->shift_held = msg[2] > 0 ? 1 : 0;
+            return;
+        }
+        if (type == 0x90 && msg[2] > 0 && msg[1] == 24 && instance->shift_held) {
+            invalidate_all_roots(instance);
+            return;
+        }
         if (type == 0x90 && msg[2] > 0 && msg[1] >= 68 && msg[1] <= 99) {
             instance->pending_pad = (uint8_t)(msg[1] - 68);
             instance->pending_pad_valid = 1;
@@ -226,6 +257,13 @@ static void on_midi(void *value, const uint8_t *msg, int len, int source) {
         shared->velocities[channel][data1] = data2;
         if (instance->pending_pad_valid) {
             uint8_t pad = instance->pending_pad;
+            if (instance->map_valid[channel][pad] && instance->map_note[channel][pad] != data1) {
+                /* A known physical pad now emits a different pitch: the Move
+                   mapping changed. Invalidate immediately and discard every
+                   stale observation on this channel before learning anew. */
+                invalidate_channel_root(instance, channel);
+                memset(instance->map_valid[channel], 0, 32);
+            }
             instance->map_note[channel][pad] = data1;
             instance->map_valid[channel][pad] = 1;
             instance->pending_pad_valid = 0;
