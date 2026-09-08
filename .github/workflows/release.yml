@@ -19,7 +19,7 @@ jobs:
         run: bash scripts/build.sh
       - name: Verify package
         run: |
-          PKG=dist/harmonybus-monitor-v0.1.91-tool.tar.gz
+          PKG=dist/harmonybus-monitor-v0.1.92-tool.tar.gz
           gzip -t "$PKG"
           rm -rf /tmp/hbmon
           mkdir -p /tmp/hbmon
@@ -27,16 +27,16 @@ jobs:
           test -f /tmp/hbmon/harmonybus-monitor/module.json
           test -f /tmp/hbmon/harmonybus-monitor/ui.js
           test -f /tmp/hbmon/harmonybus-monitor/dsp.so
-          python3 -c 'import json; assert json.load(open("/tmp/hbmon/harmonybus-monitor/module.json"))["version"] == "0.1.91"'
+          python3 -c 'import json; assert json.load(open("/tmp/hbmon/harmonybus-monitor/module.json"))["version"] == "0.1.92"'
           nm -D /tmp/hbmon/harmonybus-monitor/dsp.so | grep -q "move_plugin_init_v2"
-      - name: Publish v0.1.91 release
+      - name: Publish v0.1.92 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.91 >/dev/null 2>&1; then
-            gh release upload v0.1.91 dist/harmonybus-monitor-v0.1.91-tool.tar.gz --clobber
+          if gh release view v0.1.92 >/dev/null 2>&1; then
+            gh release upload v0.1.92 dist/harmonybus-monitor-v0.1.92-tool.tar.gz --clobber
           else
-            gh release create v0.1.91 dist/harmonybus-monitor-v0.1.91-tool.tar.gz \
-              --title "HarmonyBus Monitor v0.1.91" \
+            gh release create v0.1.92 dist/harmonybus-monitor-v0.1.92-tool.tar.gz \
+              --title "HarmonyBus Monitor v0.1.92" \
               --notes "Source-aware cable-2 note monitor companion for HarmonyBus."
           fi
