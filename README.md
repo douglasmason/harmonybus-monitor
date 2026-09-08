@@ -21,3 +21,5 @@ bash scripts/build.sh
 ```
 
 The release artifact is `dist/harmonybus-monitor-v0.1.91-tool.tar.gz`.
+
+Repository split complete.
