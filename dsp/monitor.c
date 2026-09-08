@@ -12,8 +12,8 @@
 #define MOVE_PLUGIN_API_VERSION_2 2
 #define MOVE_MIDI_SOURCE_EXTERNAL 2
 #define HB_MONITOR_MAGIC 0x48424d31u
-#define HB_MONITOR_VERSION 1u
-#define HB_MONITOR_SHM "/harmonybus-monitor-v1"
+#define HB_MONITOR_VERSION 2u
+#define HB_MONITOR_SHM "/harmonybus-monitor-v2"
 
 #define O_RDWR 2
 #define O_CREAT 64
@@ -31,6 +31,9 @@ typedef struct {
     volatile uint32_t realtime_events;
     volatile uint8_t playing;
     volatile uint8_t velocities[16][128];
+    volatile uint8_t root_valid[16];
+    volatile uint8_t root_pc[16];
+    volatile uint8_t root_confirmations[16];
 } hb_monitor_shared_t;
 
 typedef struct host_api_v1 host_api_v1_t;
@@ -55,6 +58,9 @@ extern int strcmp(const char *a, const char *b);
 
 typedef struct {
     hb_monitor_shared_t *shared;
+    uint8_t pending_root_probe;
+    uint8_t last_root_pc[16];
+    uint8_t root_streak[16];
 } monitor_instance_t;
 
 static hb_monitor_shared_t *open_shared(void) {
@@ -88,6 +94,7 @@ static void *create_instance(const char *module_dir, const char *json_defaults) 
     (void)module_dir;
     (void)json_defaults;
     static monitor_instance_t instance;
+    memset(&instance, 0, sizeof(instance));
     instance.shared = open_shared();
     return &instance;
 }
@@ -108,6 +115,18 @@ static void on_midi(void *value, const uint8_t *msg, int len, int source) {
         } else if (msg[0] == 0xFC) {
             shared->playing = 0;
             clear_all(shared);
+        }
+        return;
+    }
+
+    /* Physical Move pads are internal notes 68..99. Pad 68 is bottom-left,
+       which is the row root in Move's In-Key layouts. Pair its press with the
+       next cable-2 pitched note emitted by Move, then require two consistent
+       observations on that MIDI channel before publishing a root. */
+    if (source == 0 && len >= 3) {
+        uint8_t type = msg[0] & 0xF0;
+        if (type == 0x90 && msg[2] > 0 && msg[1] == 68) {
+            instance->pending_root_probe = 1;
         }
         return;
     }
@@ -133,6 +152,22 @@ static void on_midi(void *value, const uint8_t *msg, int len, int source) {
     shared->seq++;
     if (type == 0x90 && data2 > 0) {
         shared->velocities[channel][data1] = data2;
+        if (instance->pending_root_probe) {
+            uint8_t root = (uint8_t)(data1 % 12);
+            if (instance->root_streak[channel] > 0 && instance->last_root_pc[channel] == root) {
+                if (instance->root_streak[channel] < 255) instance->root_streak[channel]++;
+            } else {
+                instance->last_root_pc[channel] = root;
+                instance->root_streak[channel] = 1;
+                shared->root_valid[channel] = 0;
+            }
+            if (instance->root_streak[channel] >= 2) {
+                shared->root_pc[channel] = root;
+                shared->root_confirmations[channel] = instance->root_streak[channel];
+                shared->root_valid[channel] = 1;
+            }
+            instance->pending_root_probe = 0;
+        }
     } else {
         shared->velocities[channel][data1] = 0;
     }
@@ -150,7 +185,7 @@ static int get_param(void *value, const char *key, char *buffer, int length) {
     monitor_instance_t *instance = (monitor_instance_t *)value;
     hb_monitor_shared_t *shared = instance ? instance->shared : 0;
     if (!key || !buffer || length < 2) return -1;
-    if (strcmp(key, "ping") == 0) return snprintf(buffer, (unsigned long)length, "pong hbmon1");
+    if (strcmp(key, "ping") == 0) return snprintf(buffer, (unsigned long)length, "pong hbmon2");
     if (!shared) return snprintf(buffer, (unsigned long)length, "absent");
     if (strcmp(key, "status") == 0) {
         return snprintf(buffer, (unsigned long)length, "g%u e%u rt%u p%u",
