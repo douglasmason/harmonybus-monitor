@@ -20,5 +20,5 @@ cp "$ROOT/ui.js" "$PKG/ui.js"
 cp "$OUT/dsp.so" "$PKG/dsp.so"
 chmod +x "$PKG/dsp.so"
 
-(cd "$DIST" && tar -czf harmonybus-monitor-v0.1.91-tool.tar.gz harmonybus-monitor)
-echo "$DIST/harmonybus-monitor-v0.1.91-tool.tar.gz"
+(cd "$DIST" && tar -czf harmonybus-monitor-v0.1.92-tool.tar.gz harmonybus-monitor)
+echo "$DIST/harmonybus-monitor-v0.1.92-tool.tar.gz"
